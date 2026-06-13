@@ -293,16 +293,54 @@ def _demo():
 # is done in software -- add the multiplicand into the product for each 1
 # bit of the multiplier, shifting the multiplicand left and the multiplier
 # right on each of the 12 steps.
+#
+# Page-zero scratch (0040-0044): MCAND, MPLR, PROD, CNT, CNTINIT(-12).
+# Entry MUL = 0220; operands come from MCAND/MPLR, product is left in PROD
+# and AC. The block is shared by both demos below.
 # ----------------------------------------------------------------------
+_MUL_SUBROUTINE = {
+    0o0220: 0o0000,   # MUL: return-address slot (filled by JMS)
+    0o0221: 0o7200,   # CLA
+    0o0222: 0o3042,   # DCA PROD     ; product = 0
+    0o0223: 0o1044,   # TAD CNTINIT  ; AC = -12
+    0o0224: 0o3043,   # DCA CNT      ; loop 12 times
+    0o0225: 0o7200,   # LOOP: CLA
+    0o0226: 0o1041,   # TAD MPLR
+    0o0227: 0o7110,   # CLL RAR      ; low bit of multiplier -> link
+    0o0230: 0o3041,   # DCA MPLR     ; store multiplier >> 1
+    0o0231: 0o7420,   # SNL          ; skip add if that bit was 1
+    0o0232: 0o5237,   # JMP SKIPADD
+    0o0233: 0o7200,   # CLA
+    0o0234: 0o1042,   # TAD PROD
+    0o0235: 0o1040,   # TAD MCAND    ; product += multiplicand
+    0o0236: 0o3042,   # DCA PROD
+    0o0237: 0o7200,   # SKIPADD: CLA
+    0o0240: 0o1040,   # TAD MCAND
+    0o0241: 0o7104,   # CLL RAL      ; multiplicand << 1
+    0o0242: 0o3040,   # DCA MCAND
+    0o0243: 0o2043,   # ISZ CNT      ; ++count, skip when it hits 0
+    0o0244: 0o5225,   # JMP LOOP
+    0o0245: 0o7200,   # CLA
+    0o0246: 0o1042,   # TAD PROD     ; return product in AC
+    0o0247: 0o5620,   # JMP I MUL    ; return to caller
+    0o0044: (-12) & MASK,  # CNTINIT = -12, the loop count
+}
+
+
+def _assemble(asm):
+    cpu = PDP8()
+    for addr, word in asm.items():
+        cpu.store(addr, word)
+    cpu.pc = 0o0200
+    return cpu
+
+
 def build_multiply(a, b):
     """Load a PDP-8 with a shift-and-add multiply that computes a * b.
 
     On HALT the 12-bit product is in RESULT (0216), in PROD (0042), and in AC.
     Products are taken modulo 4096, exactly as the real 12-bit hardware would.
     """
-    # Page-zero scratch variables.
-    MCAND, MPLR, PROD, CNT, CNTINIT = 0o0040, 0o0041, 0o0042, 0o0043, 0o0044
-    # MUL = 0220 (subroutine entry); VALA/VALB/RESULT are current-page data.
     asm = {
         # --- main: set up operands, call MUL, stash the result -----------
         0o0200: 0o7200,   # CLA
@@ -317,47 +355,122 @@ def build_multiply(a, b):
         0o0214: a & MASK,  # VALA
         0o0215: b & MASK,  # VALB
         0o0216: 0,         # RESULT
-        # --- MUL subroutine ----------------------------------------------
-        0o0220: 0o0000,   # MUL: return-address slot (filled by JMS)
-        0o0221: 0o7200,   # CLA
-        0o0222: 0o3042,   # DCA PROD     ; product = 0
-        0o0223: 0o1044,   # TAD CNTINIT  ; AC = -12
-        0o0224: 0o3043,   # DCA CNT      ; loop 12 times
-        0o0225: 0o7200,   # LOOP: CLA
-        0o0226: 0o1041,   # TAD MPLR
-        0o0227: 0o7110,   # CLL RAR      ; low bit of multiplier -> link
-        0o0230: 0o3041,   # DCA MPLR     ; store multiplier >> 1
-        0o0231: 0o7420,   # SNL          ; skip add if that bit was 1
-        0o0232: 0o5237,   # JMP SKIPADD
-        0o0233: 0o7200,   # CLA
-        0o0234: 0o1042,   # TAD PROD
-        0o0235: 0o1040,   # TAD MCAND    ; product += multiplicand
-        0o0236: 0o3042,   # DCA PROD
-        0o0237: 0o7200,   # SKIPADD: CLA
-        0o0240: 0o1040,   # TAD MCAND
-        0o0241: 0o7104,   # CLL RAL      ; multiplicand << 1
-        0o0242: 0o3040,   # DCA MCAND
-        0o0243: 0o2043,   # ISZ CNT      ; ++count, skip when it hits 0
-        0o0244: 0o5225,   # JMP LOOP
-        0o0245: 0o7200,   # CLA
-        0o0246: 0o1042,   # TAD PROD     ; return product in AC
-        0o0247: 0o5620,   # JMP I MUL    ; return to caller
-        # --- page-zero constant ------------------------------------------
-        CNTINIT: (-12) & MASK,  # -12, the loop count
     }
-    cpu = PDP8()
-    for addr, word in asm.items():
-        cpu.store(addr, word)
-    cpu.pc = 0o0200
-    return cpu
+    asm.update(_MUL_SUBROUTINE)
+    return _assemble(asm)
+
+
+# ----------------------------------------------------------------------
+# Binary-to-decimal print: the base PDP-8 has no divide either, so each
+# decimal digit is found by repeated subtraction. For each power of ten
+# (1000, 100, 10) we subtract it from the running value as many times as we
+# can; the subtraction count is the digit. The leftover after the tens loop
+# is the units digit. Leading zeros are suppressed (but a lone 0 still
+# prints). Digits are turned into ASCII by adding '0' (060) and sent to the
+# teleprinter via the PRINT subroutine.
+#
+# Extra page-zero scratch: VAL(0045) running value, DIG(0046) digit count,
+# SUPP(0047) leading-zero suppress flag, NEGP(0050) current -power, plus
+# autoindex register 11 walking the negative-powers table. Constants:
+# PTRINIT(0051)=POWERS-1, K0(0052)='0', KNL(0053)='\n', ONE(0054)=1.
+# ----------------------------------------------------------------------
+def build_multiply_print(a, b):
+    """Compute a * b, then print the product in decimal to the teletype.
+
+    After run(), cpu.output_text() holds the decimal digits and a newline.
+    """
+    asm = {
+        # --- main: multiply, copy product to VAL, print it ---------------
+        0o0200: 0o7200,   # CLA
+        0o0201: 0o1214,   # TAD VALA
+        0o0202: 0o3040,   # DCA MCAND
+        0o0203: 0o1215,   # TAD VALB
+        0o0204: 0o3041,   # DCA MPLR
+        0o0205: 0o4220,   # JMS MUL
+        0o0206: 0o3216,   # DCA RESULT
+        0o0207: 0o1216,   # TAD RESULT
+        0o0210: 0o3045,   # DCA VAL        ; hand the product to PRDEC
+        0o0211: 0o4256,   # JMS PRDEC
+        0o0212: 0o7402,   # HLT
+        # --- current-page data -------------------------------------------
+        0o0214: a & MASK,  # VALA
+        0o0215: b & MASK,  # VALB
+        0o0216: 0,         # RESULT
+        # --- PRINT: send the character in AC to the teleprinter ----------
+        0o0250: 0o0000,   # PRINT: return-address slot
+        0o0251: 0o6046,   # TLS            ; load buffer, start printing
+        0o0252: 0o6041,   # TSF            ; skip when ready
+        0o0253: 0o5252,   # JMP .-1
+        0o0254: 0o7200,   # CLA
+        0o0255: 0o5650,   # JMP I PRINT
+        # --- PRDEC: print VAL as decimal ---------------------------------
+        0o0256: 0o0000,   # PRDEC: return-address slot
+        0o0257: 0o7200,   # CLA
+        0o0260: 0o1054,   # TAD ONE
+        0o0261: 0o3047,   # DCA SUPP       ; suppress leading zeros = 1
+        0o0262: 0o1051,   # TAD PTRINIT
+        0o0263: 0o3011,   # DCA 11         ; autoindex reg -> POWERS-1
+        0o0264: 0o7200,   # DIGLOOP: CLA
+        0o0265: 0o1411,   # TAD I 11       ; AC = next -power (0 ends table)
+        0o0266: 0o7450,   # SNA
+        0o0267: 0o5323,   # JMP UNITS      ; table exhausted -> units digit
+        0o0270: 0o3050,   # DCA NEGP
+        0o0271: 0o7200,   # CLA
+        0o0272: 0o3046,   # DCA DIG        ; digit = 0
+        0o0273: 0o7300,   # SUBLP: CLA CLL  ; clear AC and link (borrow flag)
+        0o0274: 0o1045,   # TAD VAL
+        0o0275: 0o1050,   # TAD NEGP       ; AC = VAL - power; link = carry
+        0o0276: 0o7420,   # SNL            ; skip if it carried (VAL >= power)
+        0o0277: 0o5303,   # JMP DIGEMIT    ; no carry -> VAL < power, digit done
+        0o0300: 0o3045,   # DCA VAL        ; accept the subtraction
+        0o0301: 0o2046,   # ISZ DIG        ; digit++
+        0o0302: 0o5273,   # JMP SUBLP
+        0o0303: 0o7200,   # DIGEMIT: CLA
+        0o0304: 0o1046,   # TAD DIG
+        0o0305: 0o7450,   # SNA            ; skip if digit != 0
+        0o0306: 0o5312,   # JMP ZERODIG
+        0o0307: 0o7200,   # CLA            ; nonzero digit:
+        0o0310: 0o3047,   # DCA SUPP       ; stop suppressing
+        0o0311: 0o5316,   # JMP DOPRINT
+        0o0312: 0o7200,   # ZERODIG: CLA
+        0o0313: 0o1047,   # TAD SUPP
+        0o0314: 0o7440,   # SZA            ; skip if not suppressing
+        0o0315: 0o5264,   # JMP DIGLOOP    ; suppressing -> drop this zero
+        0o0316: 0o7200,   # DOPRINT: CLA
+        0o0317: 0o1046,   # TAD DIG
+        0o0320: 0o1052,   # TAD K0         ; digit + '0'
+        0o0321: 0o4250,   # JMS PRINT
+        0o0322: 0o5264,   # JMP DIGLOOP
+        0o0323: 0o7200,   # UNITS: CLA
+        0o0324: 0o1045,   # TAD VAL        ; leftover 0..9 is the units digit
+        0o0325: 0o1052,   # TAD K0
+        0o0326: 0o4250,   # JMS PRINT
+        0o0327: 0o7200,   # CLA
+        0o0330: 0o1053,   # TAD KNL
+        0o0331: 0o4250,   # JMS PRINT      ; trailing newline
+        0o0332: 0o5656,   # JMP I PRDEC
+        # --- negative powers of ten (table walked by reg 11) -------------
+        0o0333: (-1000) & MASK,
+        0o0334: (-100) & MASK,
+        0o0335: (-10) & MASK,
+        0o0336: 0o0000,   # terminator
+        # --- page-zero constants -----------------------------------------
+        0o0051: 0o0332,   # PTRINIT = POWERS - 1
+        0o0052: 0o0060,   # K0  = ASCII '0'
+        0o0053: 0o0012,   # KNL = ASCII newline
+        0o0054: 0o0001,   # ONE
+    }
+    asm.update(_MUL_SUBROUTINE)
+    return _assemble(asm)
 
 
 def _demo_multiply():
     for a, b in [(7, 6), (12, 12), (25, 9), (63, 63)]:
-        cpu = build_multiply(a, b)
+        cpu = build_multiply_print(a, b)
         cpu.run()
-        print(f"{a:>3} * {b:<3} = {cpu.fetch(0o0216):<5} "
-              f"({cpu.cycles} cycles, software shift-and-add)")
+        printed = cpu.output_text().strip()
+        print(f"{a:>3} * {b:<3} = {printed:<5} "
+              f"({cpu.cycles} cycles; PDP-8 multiplied and printed it)")
 
 
 if __name__ == "__main__":

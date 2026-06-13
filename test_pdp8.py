@@ -1,7 +1,7 @@
 """Tests for the PDP-8 emulator. Run with: python3 -m pytest test_pdp8.py
 or just: python3 test_pdp8.py
 """
-from pdp8 import PDP8, MASK, build_multiply
+from pdp8 import PDP8, MASK, build_multiply, build_multiply_print
 
 
 def run(words, start=0o0200, **state):
@@ -149,6 +149,17 @@ def test_software_multiply():
         cpu.run()
         assert cpu.fetch(0o0216) == (a * b) & MASK, (a, b)
         assert cpu.ac == 0  # AC cleared by DCA RESULT after the call
+
+
+def test_multiply_print_decimal():
+    # The product is converted to decimal in-machine and printed to the
+    # teletype. Covers leading-zero suppression, a lone zero, and 4 digits.
+    cases = [(0, 5), (7, 6), (12, 12), (25, 9), (63, 63),
+             (50, 20), (100, 10), (100, 100)]  # 1000, 1000, 1808 (wrapped)
+    for a, b in cases:
+        cpu = build_multiply_print(a, b)
+        cpu.run()
+        assert cpu.output_text() == f"{(a * b) & MASK}\n", (a, b)
 
 
 def test_interrupt():
