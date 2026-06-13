@@ -1,7 +1,7 @@
 """Tests for the PDP-8 emulator. Run with: python3 -m pytest test_pdp8.py
 or just: python3 test_pdp8.py
 """
-from pdp8 import PDP8, MASK
+from pdp8 import PDP8, MASK, build_multiply
 
 
 def run(words, start=0o0200, **state):
@@ -138,6 +138,17 @@ def test_teletype_output():
     cpu.load_program([0o7200, 0o1210, 0o6046, 0o7402], 0o0200)
     cpu.run()
     assert cpu.output_text() == 'A'
+
+
+def test_software_multiply():
+    # The shift-and-add subroutine, across edge cases and a result that
+    # overflows 12 bits (100*100 = 10000 -> 1808 mod 4096).
+    for a, b in [(0, 5), (5, 0), (1, 1), (7, 6), (12, 12),
+                 (25, 9), (63, 63), (100, 100)]:
+        cpu = build_multiply(a, b)
+        cpu.run()
+        assert cpu.fetch(0o0216) == (a * b) & MASK, (a, b)
+        assert cpu.ac == 0  # AC cleared by DCA RESULT after the call
 
 
 def test_interrupt():

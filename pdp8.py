@@ -287,5 +287,80 @@ def _demo():
     print("Cycles:", cpu.cycles)
 
 
+# ----------------------------------------------------------------------
+# Software multiply: a shift-and-add subroutine. The base PDP-8 has no
+# multiply instruction (that lived in the optional EAE), so multiplication
+# is done in software -- add the multiplicand into the product for each 1
+# bit of the multiplier, shifting the multiplicand left and the multiplier
+# right on each of the 12 steps.
+# ----------------------------------------------------------------------
+def build_multiply(a, b):
+    """Load a PDP-8 with a shift-and-add multiply that computes a * b.
+
+    On HALT the 12-bit product is in RESULT (0216), in PROD (0042), and in AC.
+    Products are taken modulo 4096, exactly as the real 12-bit hardware would.
+    """
+    # Page-zero scratch variables.
+    MCAND, MPLR, PROD, CNT, CNTINIT = 0o0040, 0o0041, 0o0042, 0o0043, 0o0044
+    # MUL = 0220 (subroutine entry); VALA/VALB/RESULT are current-page data.
+    asm = {
+        # --- main: set up operands, call MUL, stash the result -----------
+        0o0200: 0o7200,   # CLA
+        0o0201: 0o1214,   # TAD VALA     ; AC = a
+        0o0202: 0o3040,   # DCA MCAND
+        0o0203: 0o1215,   # TAD VALB     ; AC = b
+        0o0204: 0o3041,   # DCA MPLR
+        0o0205: 0o4220,   # JMS MUL
+        0o0206: 0o3216,   # DCA RESULT
+        0o0207: 0o7402,   # HLT
+        # --- current-page data -------------------------------------------
+        0o0214: a & MASK,  # VALA
+        0o0215: b & MASK,  # VALB
+        0o0216: 0,         # RESULT
+        # --- MUL subroutine ----------------------------------------------
+        0o0220: 0o0000,   # MUL: return-address slot (filled by JMS)
+        0o0221: 0o7200,   # CLA
+        0o0222: 0o3042,   # DCA PROD     ; product = 0
+        0o0223: 0o1044,   # TAD CNTINIT  ; AC = -12
+        0o0224: 0o3043,   # DCA CNT      ; loop 12 times
+        0o0225: 0o7200,   # LOOP: CLA
+        0o0226: 0o1041,   # TAD MPLR
+        0o0227: 0o7110,   # CLL RAR      ; low bit of multiplier -> link
+        0o0230: 0o3041,   # DCA MPLR     ; store multiplier >> 1
+        0o0231: 0o7420,   # SNL          ; skip add if that bit was 1
+        0o0232: 0o5237,   # JMP SKIPADD
+        0o0233: 0o7200,   # CLA
+        0o0234: 0o1042,   # TAD PROD
+        0o0235: 0o1040,   # TAD MCAND    ; product += multiplicand
+        0o0236: 0o3042,   # DCA PROD
+        0o0237: 0o7200,   # SKIPADD: CLA
+        0o0240: 0o1040,   # TAD MCAND
+        0o0241: 0o7104,   # CLL RAL      ; multiplicand << 1
+        0o0242: 0o3040,   # DCA MCAND
+        0o0243: 0o2043,   # ISZ CNT      ; ++count, skip when it hits 0
+        0o0244: 0o5225,   # JMP LOOP
+        0o0245: 0o7200,   # CLA
+        0o0246: 0o1042,   # TAD PROD     ; return product in AC
+        0o0247: 0o5620,   # JMP I MUL    ; return to caller
+        # --- page-zero constant ------------------------------------------
+        CNTINIT: (-12) & MASK,  # -12, the loop count
+    }
+    cpu = PDP8()
+    for addr, word in asm.items():
+        cpu.store(addr, word)
+    cpu.pc = 0o0200
+    return cpu
+
+
+def _demo_multiply():
+    for a, b in [(7, 6), (12, 12), (25, 9), (63, 63)]:
+        cpu = build_multiply(a, b)
+        cpu.run()
+        print(f"{a:>3} * {b:<3} = {cpu.fetch(0o0216):<5} "
+              f"({cpu.cycles} cycles, software shift-and-add)")
+
+
 if __name__ == "__main__":
     _demo()
+    print()
+    _demo_multiply()
