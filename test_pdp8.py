@@ -131,16 +131,6 @@ def test_osr():
     assert cpu.ac == 0o7777
 
 
-def test_mq_swap():
-    # MQL loads MQ from AC and clears AC; MQA ORs MQ back.
-    cpu = PDP8()
-    cpu.load_program([0o7421, 0o7501, 0o7402], 0o0200)  # MQL ; MQA ; HLT
-    cpu.ac = 0o1234
-    cpu.run()
-    assert cpu.mq == 0o1234
-    assert cpu.ac == 0o1234
-
-
 def test_teletype_output():
     cpu = PDP8()
     # CLA; TAD char; TLS; HLT  -> prints one character

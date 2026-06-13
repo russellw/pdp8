@@ -1,9 +1,13 @@
 """A PDP-8 emulator.
 
 The PDP-8 is a 12-bit minicomputer made by Digital Equipment Corporation in
-the 1960s. This emulates the core CPU: the 8 basic instructions, the OPR
-microcoded operate instructions (groups 1, 2 and 3), program-controlled
+the 1960s. This emulates the base CPU: the 8 basic instructions, the OPR
+microcoded operate instructions (groups 1 and 2), program-controlled
 interrupts, and a teletype-style console device on IOT device 03/04.
+
+The optional Extended Arithmetic Element (EAE) -- the MQ register and the
+group-3 operate / multiply-divide instructions -- is deliberately omitted;
+this is the minimal base machine.
 
 All values are 12-bit unless noted. The link (L) is a single bit that sits
 above the accumulator and catches carries.
@@ -25,7 +29,6 @@ class PDP8:
         self.ac = 0          # accumulator (12 bits)
         self.l = 0           # link (1 bit)
         self.pc = 0o0200     # program counter; programs conventionally start at 0200
-        self.mq = 0          # multiplier-quotient register
         self.sr = 0          # console switch register
         self.running = False
         self.halted = False
@@ -132,16 +135,10 @@ class PDP8:
                 self.halted = True
                 self.running = False
         else:
-            # Group 3: AC / MQ register operations (the common subset).
-            if instr & 0o0200:            # CLA
-                self.ac = 0
-            mqa = instr & 0o0100          # MQA: OR MQ into AC
-            mql = instr & 0o0020          # MQL: load MQ from AC, clear AC
-            if mqa:
-                self.ac |= self.mq
-            if mql:
-                self.mq = self.ac
-                self.ac = 0
+            # Group 3 encodings belong to the optional EAE (MQ register,
+            # multiply/divide). On the base machine they are unimplemented and
+            # behave as no-ops.
+            pass
 
     def _rar(self):
         new_l = self.ac & 1
