@@ -1,7 +1,7 @@
 """Tests for the PDP-8 emulator. Run with: python3 -m pytest test_pdp8.py
 or just: python3 test_pdp8.py
 """
-from pdp8 import PDP8, MASK, build_multiply, build_multiply_print
+from pdp8 import PDP8, MASK, build_multiply, build_multiply_print, shr, shl
 
 
 def run(words, start=0o0200, **state):
@@ -160,6 +160,49 @@ def test_multiply_print_decimal():
         cpu = build_multiply_print(a, b)
         cpu.run()
         assert cpu.output_text() == f"{(a * b) & MASK}\n", (a, b)
+
+
+def test_shr_in_place():
+    # SHR shifts a page-zero word right in place; AC is untouched.
+    cpu = PDP8()
+    cpu.store(0o0040, 0o0006)
+    cpu.load_program([shr(0o0040), 0o7402], 0o0200)  # SHR 0040 ; HLT
+    cpu.ac = 0o1234
+    cpu.run()
+    assert cpu.fetch(0o0040) == 0o0003  # 6 >> 1
+    assert cpu.ac == 0o1234             # accumulator not disturbed
+
+
+def test_shr_low_bit_to_link():
+    # The bit shifted out of the bottom lands in the link.
+    cpu = PDP8()
+    cpu.store(0o0040, 0o0007)
+    cpu.load_program([shr(0o0040), 0o7402], 0o0200)
+    cpu.l = 0
+    cpu.run()
+    assert cpu.fetch(0o0040) == 0o0003
+    assert cpu.l == 1                   # old bit 0 was 1
+
+
+def test_shl_in_place():
+    # SHL shifts left in place with zero fill; high bit goes to the link.
+    cpu = PDP8()
+    cpu.store(0o0040, 0o4001)           # bit 11 and bit 0 set
+    cpu.load_program([shl(0o0040), 0o7402], 0o0200)  # SHL 0040 ; HLT
+    cpu.l = 0
+    cpu.run()
+    assert cpu.fetch(0o0040) == 0o0002  # (0o4001 << 1) & 7777
+    assert cpu.l == 1                   # old bit 11 was 1
+
+
+def test_shift_addresses_low_page_zero():
+    # The 6-bit field reaches page-zero locations 0..63.
+    for addr in (0o0010, 0o0040, 0o0077):
+        cpu = PDP8()
+        cpu.store(addr, 0o2000)
+        cpu.load_program([shl(addr), 0o7402], 0o0200)
+        cpu.run()
+        assert cpu.fetch(addr) == 0o4000, oct(addr)
 
 
 def test_interrupt():

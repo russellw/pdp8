@@ -6,8 +6,11 @@ microcoded operate instructions (groups 1 and 2), program-controlled
 interrupts, and a teletype-style console device on IOT device 03/04.
 
 The optional Extended Arithmetic Element (EAE) -- the MQ register and the
-group-3 operate / multiply-divide instructions -- is deliberately omitted;
-this is the minimal base machine.
+group-3 operate / multiply-divide instructions -- is deliberately omitted.
+This frees the group-3 encoding space, which this variant reuses for an
+in-place memory-shift instruction (see `shr` / `shl`) -- a "with hindsight"
+addition that lets the shift-heavy inner loops of fixed-point lab code run
+without hauling each operand in and out of the accumulator.
 
 All values are 12-bit unless noted. The link (L) is a single bit that sits
 above the accumulator and catches carries.
@@ -21,6 +24,25 @@ SIGN = 0o4000          # sign bit of a 12-bit word
 MEM_WORDS = 0o10000    # 4096 words = one memory field
 PAGE = 0o0200          # 128 words per page
 ADDR = 0o0177          # 7-bit in-page offset
+
+
+def shr(addr):
+    """Encode SHR: shift the page-zero word at `addr` right one bit, in place.
+
+    Zero fills at the top; the bit shifted out of the bottom goes to the link.
+    A group-3 OPR word: bit 7 clear selects right, bits 1-6 hold the 6-bit
+    page-zero address (0-63).
+    """
+    return 0o7401 | ((addr & 0o77) << 1)
+
+
+def shl(addr):
+    """Encode SHL: shift the page-zero word at `addr` left one bit, in place.
+
+    Zero fills at the bottom; the bit shifted out of the top goes to the link.
+    A group-3 OPR word: bit 7 set selects left, bits 1-6 hold the address.
+    """
+    return 0o7401 | 0o0200 | ((addr & 0o77) << 1)
 
 
 class PDP8:
@@ -135,10 +157,21 @@ class PDP8:
                 self.halted = True
                 self.running = False
         else:
-            # Group 3 encodings belong to the optional EAE (MQ register,
-            # multiply/divide). On the base machine they are unimplemented and
-            # behave as no-ops.
-            pass
+            # Group 3 -- formerly the EAE encoding space, now an in-place
+            # memory shift. Core memory is destructive-read, so every access
+            # already reads a word and rewrites it; this routes that rewrite
+            # through the shifter (the same one RAR/RAL use) to shift a
+            # page-zero location for one ISZ-style read-modify-write cycle,
+            # without disturbing AC. The bit shifted out goes to the link.
+            #   bit 7 = direction (0 right, 1 left); bits 1-6 = page-zero addr
+            addr = (instr >> 1) & 0o77
+            v = self.fetch(addr)
+            if instr & 0o0200:            # SHL: left, zero fill
+                self.l = (v >> 11) & 1
+                self.store(addr, (v << 1) & MASK)
+            else:                         # SHR: right, zero fill
+                self.l = v & 1
+                self.store(addr, v >> 1)
 
     def _rar(self):
         new_l = self.ac & 1
@@ -297,32 +330,30 @@ def _demo():
 # Page-zero scratch (0040-0044): MCAND, MPLR, PROD, CNT, CNTINIT(-12).
 # Entry MUL = 0220; operands come from MCAND/MPLR, product is left in PROD
 # and AC. The block is shared by both demos below.
+#
+# The two operand shifts are done in place with SHR / SHL: a multiplier
+# right-shift drops its low bit straight into the link (no CLL RAR; no
+# store-back), and the multiplicand left-shift never touches AC. That is
+# where this variant's multiply spends ~1/3 fewer cycles than the base
+# machine -- the accumulator is no longer a turnstile for every shift.
 # ----------------------------------------------------------------------
 _MUL_SUBROUTINE = {
     0o0220: 0o0000,   # MUL: return-address slot (filled by JMS)
-    0o0221: 0o7200,   # CLA
-    0o0222: 0o3042,   # DCA PROD     ; product = 0
+    0o0221: 0o7200,   # CLA          ; entry: ensure PROD starts from 0
+    0o0222: 0o3042,   # DCA PROD     ; product = 0 (also clears AC)
     0o0223: 0o1044,   # TAD CNTINIT  ; AC = -12
     0o0224: 0o3043,   # DCA CNT      ; loop 12 times
-    0o0225: 0o7200,   # LOOP: CLA
-    0o0226: 0o1041,   # TAD MPLR
-    0o0227: 0o7110,   # CLL RAR      ; low bit of multiplier -> link
-    0o0230: 0o3041,   # DCA MPLR     ; store multiplier >> 1
-    0o0231: 0o7420,   # SNL          ; skip add if that bit was 1
-    0o0232: 0o5237,   # JMP SKIPADD
-    0o0233: 0o7200,   # CLA
-    0o0234: 0o1042,   # TAD PROD
-    0o0235: 0o1040,   # TAD MCAND    ; product += multiplicand
-    0o0236: 0o3042,   # DCA PROD
-    0o0237: 0o7200,   # SKIPADD: CLA
-    0o0240: 0o1040,   # TAD MCAND
-    0o0241: 0o7104,   # CLL RAL      ; multiplicand << 1
-    0o0242: 0o3040,   # DCA MCAND
-    0o0243: 0o2043,   # ISZ CNT      ; ++count, skip when it hits 0
-    0o0244: 0o5225,   # JMP LOOP
-    0o0245: 0o7200,   # CLA
-    0o0246: 0o1042,   # TAD PROD     ; return product in AC
-    0o0247: 0o5620,   # JMP I MUL    ; return to caller
+    0o0225: shr(0o041),  # LOOP: SHR MPLR  ; MPLR >>= 1, low bit -> link
+    0o0226: 0o7420,   # SNL          ; skip add if that bit was 1
+    0o0227: 0o5233,   # JMP SKIPADD
+    0o0230: 0o1042,   # TAD PROD
+    0o0231: 0o1040,   # TAD MCAND    ; product += multiplicand
+    0o0232: 0o3042,   # DCA PROD
+    0o0233: shl(0o040),  # SKIPADD: SHL MCAND  ; MCAND <<= 1, in place
+    0o0234: 0o2043,   # ISZ CNT      ; ++count, skip when it hits 0
+    0o0235: 0o5225,   # JMP LOOP
+    0o0236: 0o1042,   # TAD PROD     ; return product in AC
+    0o0237: 0o5620,   # JMP I MUL    ; return to caller
     0o0044: (-12) & MASK,  # CNTINIT = -12, the loop count
 }
 
@@ -373,6 +404,8 @@ def build_multiply(a, b):
 # SUPP(0047) leading-zero suppress flag, NEGP(0050) current -power, plus
 # autoindex register 11 walking the negative-powers table. Constants:
 # PTRINIT(0051)=POWERS-1, K0(0052)='0', KNL(0053)='\n', ONE(0054)=1.
+# (This routine is subtract-and-compare, not shift-bound, so it gains
+# nothing from the memory-shift and just uses ordinary page-zero constants.)
 # ----------------------------------------------------------------------
 def build_multiply_print(a, b):
     """Compute a * b, then print the product in decimal to the teletype.
